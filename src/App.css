@@ -23,6 +23,14 @@
   opacity: 0.8;
 }
 
+.errorDetails {
+  margin-top: 10px;
+  padding: 10px;
+  white-space: pre-wrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+    "Liberation Mono", "Courier New", monospace;
+}
+
 .logo {
   height: 6em;
   padding: 1.5em;
