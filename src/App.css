@@ -2,7 +2,25 @@
   max-width: 1280px;
   margin: 0 auto;
   padding: 2rem;
-  text-align: center;
+  text-align: left;
+}
+
+.csvInput {
+  width: 100%;
+  height: 320px;
+  resize: vertical;
+}
+
+.row {
+  margin-top: 12px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.status {
+  opacity: 0.8;
 }
 
 .logo {
