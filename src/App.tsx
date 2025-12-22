@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as Tone from "tone";
 import Soundfont from "soundfont-player";
+import type { InstrumentName } from "soundfont-player";
 import "./App.css";
 
 import {
@@ -63,7 +64,6 @@ print(csv)
 
 function App() {
   const [csvText, setCsvText] = useState(DEFAULT_CSV);
-  const [inputMode, setInputMode] = useState<"csv" | "py">("csv");
   const [pythonCode, setPythonCode] = useState(DEFAULT_PYTHON);
   const [errorDetails, setErrorDetails] = useState<string | null>(null);
   const [backendTestStatus, setBackendTestStatus] = useState<
@@ -111,28 +111,33 @@ function App() {
     if (existing) return existing;
 
     const audioContext = Tone.getContext().rawContext as AudioContext;
-    const p = Soundfont.instrument(audioContext, name, {
+    const p = Soundfont.instrument(audioContext, name as InstrumentName, {
       soundfont: SOUNDFONT_NAME,
       format: SOUNDFONT_FORMAT,
       nameToUrl: soundfontNameToUrl,
     }).catch(async (err) => {
       // If an instrument is missing (varies by soundfont set), fall back to piano.
       console.warn(`[soundfont] failed to load ${name}, falling back`, err);
-      return await Soundfont.instrument(audioContext, "acoustic_grand_piano", {
-        soundfont: SOUNDFONT_NAME,
-        format: SOUNDFONT_FORMAT,
-        nameToUrl: soundfontNameToUrl,
-      });
+      return await Soundfont.instrument(
+        audioContext,
+        "acoustic_grand_piano" as InstrumentName,
+        {
+          soundfont: SOUNDFONT_NAME,
+          format: SOUNDFONT_FORMAT,
+          nameToUrl: soundfontNameToUrl,
+        }
+      );
     });
 
     instrumentPromisesRef.current.set(name, p);
     return p;
   }
 
-  const canPlayLabel = useMemo(() => {
-    if (inputMode === "csv") return csvText.trim().length > 0;
-    return pythonCode.trim().length > 0;
-  }, [csvText, inputMode, pythonCode]);
+  const canPlayMidi = useMemo(() => csvText.trim().length > 0, [csvText]);
+  const canRunPython = useMemo(
+    () => pythonCode.trim().length > 0,
+    [pythonCode]
+  );
 
   useEffect(() => {
     return () => {
@@ -275,9 +280,60 @@ function App() {
     }, totalSeconds);
   }
 
+  async function runPythonToMidi() {
+    setErrorDetails(null);
+
+    // Required by browsers: must be called from a user gesture.
+    await Tone.start();
+
+    setStatus("Loading Pyodide…");
+    await ensurePyodideReady();
+
+    setStatus("Running Python…");
+    const { stdout, stderr } = await runPythonAndCaptureStdout(pythonCode);
+
+    // Debugging: show program output in the browser console.
+    console.log("[pyodide] stdout:\n" + stdout);
+    if (stderr.trim().length > 0) console.warn("[pyodide] stderr:\n" + stderr);
+
+    const generatedCsv = stdout;
+    if (generatedCsv.trim().length === 0) {
+      const dbg = await getPyodideDebugInfo().catch(() => null);
+      const parts: string[] = ["Python did not print any MIDI CSV to stdout."];
+      if (dbg)
+        parts.push(
+          `Pyodide indexURL: ${dbg.indexURL}`,
+          `Pyodide version: ${dbg.version ?? "(unknown)"}`
+        );
+      if (stderr.trim().length > 0)
+        parts.push("\nPython stderr:\n" + stderr.trim());
+      setErrorDetails(parts.join("\n"));
+      setStatus("Error");
+      return;
+    }
+
+    if (stderr.trim().length > 0) {
+      const dbg = await getPyodideDebugInfo().catch(() => null);
+      const parts: string[] = [
+        "Python wrote to stderr (continuing anyway):",
+        stderr.trim(),
+      ];
+      if (dbg)
+        parts.push(
+          "\nPyodide debug:",
+          `indexURL: ${dbg.indexURL}`,
+          `version: ${dbg.version ?? "(unknown)"}`
+        );
+      setErrorDetails(parts.join("\n"));
+    }
+
+    setCsvText(generatedCsv);
+    setStatus("Idle");
+  }
+
   return (
     <>
-      <h2>MIDI CSV → Play (Tone.js)</h2>
+      <h2>Python → MIDI (GM-ish) → Play</h2>
 
       <div className="row">
         <button type="button" onClick={testBackendConnection}>
@@ -289,108 +345,22 @@ function App() {
         </span>
       </div>
 
-      <div className="row">
-        <label>
-          <input
-            type="radio"
-            name="inputMode"
-            value="csv"
-            checked={inputMode === "csv"}
-            onChange={() => setInputMode("csv")}
-          />{" "}
-          MIDI CSV
-        </label>
-        <label>
-          <input
-            type="radio"
-            name="inputMode"
-            value="py"
-            checked={inputMode === "py"}
-            onChange={() => setInputMode("py")}
-          />{" "}
-          Python (Pyodide stdout)
-        </label>
-      </div>
-
-      {inputMode === "csv" ? (
-        <textarea
-          className="csvInput"
-          value={csvText}
-          onChange={(e) => setCsvText(e.target.value)}
-          spellCheck={false}
-        />
-      ) : (
+      <div className="panel">
+        <div className="panelTitle">Python (runs in-browser via Pyodide)</div>
         <textarea
           className="csvInput"
           value={pythonCode}
           onChange={(e) => setPythonCode(e.target.value)}
           spellCheck={false}
         />
-      )}
+      </div>
 
       <div className="row">
         <button
           onClick={() => {
             void (async () => {
               try {
-                setErrorDetails(null);
-                // Required by browsers: must be called from a user gesture.
-                await Tone.start();
-
-                if (inputMode === "csv") {
-                  await playFromCsv(csvText);
-                  return;
-                }
-
-                setStatus("Loading Pyodide…");
-                await ensurePyodideReady();
-
-                setStatus("Running Python…");
-                const { stdout, stderr } = await runPythonAndCaptureStdout(
-                  pythonCode
-                );
-
-                // Debugging: show program output in the browser console.
-                console.log("[pyodide] stdout:\n" + stdout);
-                if (stderr.trim().length > 0)
-                  console.warn("[pyodide] stderr:\n" + stderr);
-
-                if (stderr.trim().length > 0) console.error(stderr);
-
-                const generatedCsv = stdout;
-                if (generatedCsv.trim().length === 0) {
-                  const dbg = await getPyodideDebugInfo().catch(() => null);
-                  const parts: string[] = [
-                    "Python did not print any MIDI CSV to stdout.",
-                  ];
-                  if (dbg)
-                    parts.push(
-                      `Pyodide indexURL: ${dbg.indexURL}`,
-                      `Pyodide version: ${dbg.version ?? "(unknown)"}`
-                    );
-                  if (stderr.trim().length > 0)
-                    parts.push("\nPython stderr:\n" + stderr.trim());
-                  setErrorDetails(parts.join("\n"));
-                  setStatus("Error");
-                  return;
-                }
-
-                if (stderr.trim().length > 0) {
-                  const dbg = await getPyodideDebugInfo().catch(() => null);
-                  const parts: string[] = [
-                    "Python wrote to stderr (continuing anyway):",
-                    stderr.trim(),
-                  ];
-                  if (dbg)
-                    parts.push(
-                      "\nPyodide debug:",
-                      `indexURL: ${dbg.indexURL}`,
-                      `version: ${dbg.version ?? "(unknown)"}`
-                    );
-                  setErrorDetails(parts.join("\n"));
-                }
-
-                await playFromCsv(generatedCsv);
+                await runPythonToMidi();
               } catch (err) {
                 console.error(err);
                 const dbg = await getPyodideDebugInfo().catch(() => null);
@@ -406,9 +376,45 @@ function App() {
               }
             })();
           }}
-          disabled={!canPlayLabel}
+          disabled={!canRunPython}
         >
-          Play
+          Run Python → MIDI
+        </button>
+      </div>
+
+      <div className="flowRow" aria-hidden="true">
+        <div className="flowArrow">↓</div>
+      </div>
+
+      <div className="panel">
+        <div className="panelTitle">MIDI CSV (generated or edited)</div>
+        <textarea
+          className="csvInput"
+          value={csvText}
+          onChange={(e) => setCsvText(e.target.value)}
+          spellCheck={false}
+        />
+      </div>
+
+      <div className="row">
+        <button
+          onClick={() => {
+            void (async () => {
+              try {
+                setErrorDetails(null);
+                // Required by browsers: must be called from a user gesture.
+                await Tone.start();
+                await playFromCsv(csvText);
+              } catch (err) {
+                console.error(err);
+                setErrorDetails(formatUnknownError(err));
+                setStatus("Error");
+              }
+            })();
+          }}
+          disabled={!canPlayMidi}
+        >
+          Play MIDI
         </button>
         <button onClick={() => stopPlayback("Stopped")}>Stop</button>
         <span className="status">{status}</span>
