@@ -63,6 +63,9 @@ print(csv)
 `;
 
 function App() {
+  const [promptText, setPromptText] = useState<string>(
+    "Make an 8-bar C major melody at 120bpm. Use a piano Program_c and print only MIDI CSV."
+  );
   const [csvText, setCsvText] = useState(DEFAULT_CSV);
   const [pythonCode, setPythonCode] = useState(DEFAULT_PYTHON);
   const [errorDetails, setErrorDetails] = useState<string | null>(null);
@@ -74,6 +77,7 @@ function App() {
     | "Idle"
     | "Parsing…"
     | "Loading instruments…"
+    | "Generating Python…"
     | "Loading Pyodide…"
     | "Running Python…"
     | "Playing…"
@@ -137,6 +141,11 @@ function App() {
   const canRunPython = useMemo(
     () => pythonCode.trim().length > 0,
     [pythonCode]
+  );
+
+  const canGeneratePython = useMemo(
+    () => promptText.trim().length > 0,
+    [promptText]
   );
 
   useEffect(() => {
@@ -207,6 +216,61 @@ function App() {
     } catch (err) {
       setBackendTestStatus("Error");
       setBackendTestMessage(formatUnknownError(err));
+    }
+  }
+
+  async function generatePythonFromPrompt() {
+    setErrorDetails(null);
+    setStatus("Generating Python…");
+
+    const baseUrl =
+      (import.meta.env.VITE_BACKEND_URL as string | undefined) ??
+      "http://localhost:3000/dev";
+
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(() => controller.abort(), 28_000);
+
+    try {
+      const res = await fetch(`${baseUrl}/generate-python`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          accept: "application/json",
+        },
+        body: JSON.stringify({ prompt: promptText }),
+        signal: controller.signal,
+      });
+
+      const text = await res.text();
+      if (!res.ok) {
+        setErrorDetails(`HTTP ${res.status}: ${text}`);
+        setStatus("Error");
+        return;
+      }
+
+      let data: unknown;
+      try {
+        data = JSON.parse(text);
+      } catch {
+        setErrorDetails(`Backend returned non-JSON:\n\n${text}`);
+        setStatus("Error");
+        return;
+      }
+
+      const obj = data as { ok?: unknown; python?: unknown; model?: unknown };
+      if (obj.ok !== true || typeof obj.python !== "string") {
+        setErrorDetails(`Unexpected response:\n\n${text}`);
+        setStatus("Error");
+        return;
+      }
+
+      setPythonCode(obj.python);
+      setStatus("Idle");
+    } catch (err) {
+      setErrorDetails(formatUnknownError(err));
+      setStatus("Error");
+    } finally {
+      window.clearTimeout(timeoutId);
     }
   }
 
@@ -343,6 +407,35 @@ function App() {
           Backend: {backendTestStatus}
           {backendTestMessage ? ` — ${backendTestMessage}` : ""}
         </span>
+      </div>
+
+      <div className="panel">
+        <div className="panelTitle">Prompt (generates Python)</div>
+        <textarea
+          className="csvInput"
+          value={promptText}
+          onChange={(e) => setPromptText(e.target.value)}
+          spellCheck={false}
+        />
+      </div>
+
+      <div className="row">
+        <button
+          onClick={() => {
+            void (async () => {
+              try {
+                await generatePythonFromPrompt();
+              } catch (err) {
+                console.error(err);
+                setErrorDetails(formatUnknownError(err));
+                setStatus("Error");
+              }
+            })();
+          }}
+          disabled={!canGeneratePython}
+        >
+          Generate Python
+        </button>
       </div>
 
       <div className="panel">

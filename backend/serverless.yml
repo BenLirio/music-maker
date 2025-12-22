@@ -7,13 +7,23 @@ provider:
   runtime: nodejs20.x
   region: us-east-1
   stage: ${opt:stage, 'dev'}
+  # OpenAI calls often exceed the default 6s.
+  timeout: 30
   environment:
     ALLOWED_ORIGINS: ${self:custom.allowedOriginsByStage.${sls:stage}, self:custom.allowedOriginsByStage.dev}
+    # Do NOT commit secrets. Provide these via your shell env (local) or CI/Serverless deploy env.
+    OPENAI_API_KEY: ${env:OPENAI_API_KEY, ''}
+    OPENAI_MODEL: ${env:OPENAI_MODEL, 'gpt-5.2'}
+    # Optional override for testing/proxies.
+    OPENAI_BASE_URL: ${env:OPENAI_BASE_URL, 'https://api.openai.com/v1/responses'}
 
 plugins:
   - serverless-offline
 
 custom:
+  serverless-offline:
+    # Keep local behavior aligned with provider.timeout.
+    lambdaTimeout: 30
   corsOriginByStage:
     dev: http://localhost:5173
     prod: https://benlirio.com
@@ -42,6 +52,21 @@ functions:
               - Content-Type
             methods:
               - GET
+              - OPTIONS
+
+  generatePython:
+    handler: src/handler.generatePython
+    timeout: 30
+    events:
+      - http:
+          path: generate-python
+          method: post
+          cors:
+            origin: ${self:custom.corsOriginByStage.${sls:stage}, 'http://localhost:5173'}
+            headers:
+              - Content-Type
+            methods:
+              - POST
               - OPTIONS
 
 package:
