@@ -12,6 +12,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "opensheetmusicdisplay": "^1.9.1",
     "pyodide": "^0.29.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",

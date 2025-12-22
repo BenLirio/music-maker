@@ -19,6 +19,8 @@ import {
   type ScheduledNote,
 } from "./midiCsv";
 
+import { midiBytesToBase64, midiCsvToMidiFileBytes } from "./midiFile";
+
 import {
   GM_DRUM_CHANNEL,
   gmDrumInstrumentName,
@@ -80,12 +82,59 @@ function App() {
     | "Generating Python…"
     | "Loading Pyodide…"
     | "Running Python…"
+    | "Converting to MusicXML…"
+    | "Rendering sheet music…"
     | "Playing…"
     | "Stopped"
     | "Done"
     | "Error"
     | "No notes found."
   >("Idle");
+
+  const [musicXml, setMusicXml] = useState<string | null>(null);
+  const sheetContainerRef = useRef<HTMLDivElement | null>(null);
+  const osmdRef = useRef<unknown | null>(null);
+
+  useEffect(() => {
+    if (!musicXml) return;
+
+    let cancelled = false;
+
+    void (async () => {
+      try {
+        const container = sheetContainerRef.current;
+        if (!container) return;
+
+        setStatus("Rendering sheet music…");
+
+        // Lazy-load OSMD only when needed.
+        const mod = await import("opensheetmusicdisplay");
+        const OpenSheetMusicDisplay = (
+          mod as unknown as {
+            OpenSheetMusicDisplay: new (el: HTMLElement) => any;
+          }
+        ).OpenSheetMusicDisplay;
+
+        if (!osmdRef.current) {
+          osmdRef.current = new OpenSheetMusicDisplay(container);
+        }
+
+        const osmd = osmdRef.current as any;
+        await osmd.load(musicXml);
+        osmd.render();
+
+        if (!cancelled) setStatus("Idle");
+      } catch (err) {
+        if (cancelled) return;
+        setErrorDetails(formatUnknownError(err));
+        setStatus("Error");
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [musicXml]);
 
   const partRef = useRef<Tone.Part<PlaybackValue> | null>(null);
   const instrumentPromisesRef = useRef<Map<string, Promise<Soundfont.Player>>>(
@@ -395,6 +444,76 @@ function App() {
     setStatus("Idle");
   }
 
+  async function toSheetMusicFromCsv() {
+    setErrorDetails(null);
+    setMusicXml(null);
+
+    const baseUrl =
+      (import.meta.env.VITE_BACKEND_URL as string | undefined) ??
+      "http://localhost:3000/dev";
+
+    try {
+      setStatus("Converting to MusicXML…");
+
+      const midiBytes = midiCsvToMidiFileBytes(csvText);
+      const midiBase64 = midiBytesToBase64(midiBytes);
+
+      const controller = new AbortController();
+      const timeoutId = window.setTimeout(() => controller.abort(), 28_000);
+
+      const res = await fetch(`${baseUrl}/midi-to-musicxml`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          accept: "application/json",
+        },
+        body: JSON.stringify({ midiBase64 }),
+        signal: controller.signal,
+      }).finally(() => {
+        window.clearTimeout(timeoutId);
+      });
+
+      const text = await res.text();
+      if (!res.ok) {
+        setErrorDetails(`HTTP ${res.status}: ${text}`);
+        setStatus("Error");
+        return;
+      }
+
+      let data: unknown;
+      try {
+        data = JSON.parse(text);
+      } catch {
+        setErrorDetails(`Backend returned non-JSON:\n\n${text}`);
+        setStatus("Error");
+        return;
+      }
+
+      const obj = data as {
+        ok?: unknown;
+        musicxml?: unknown;
+        warnings?: unknown;
+      };
+      if (obj.ok !== true || typeof obj.musicxml !== "string") {
+        setErrorDetails(`Unexpected response:\n\n${text}`);
+        setStatus("Error");
+        return;
+      }
+
+      if (typeof obj.warnings === "string" && obj.warnings.trim().length > 0) {
+        // Non-fatal diagnostics from python/music21.
+        setErrorDetails(obj.warnings);
+      }
+
+      setMusicXml(obj.musicxml);
+      // Rendering happens in a useEffect once the sheet container is mounted.
+      setStatus("Rendering sheet music…");
+    } catch (err) {
+      setErrorDetails(formatUnknownError(err));
+      setStatus("Error");
+    }
+  }
+
   return (
     <>
       <h2>Python → MIDI (GM-ish) → Play</h2>
@@ -510,11 +629,28 @@ function App() {
           Play MIDI
         </button>
         <button onClick={() => stopPlayback("Stopped")}>Stop</button>
+        <button
+          onClick={() => {
+            void (async () => {
+              await toSheetMusicFromCsv();
+            })();
+          }}
+          disabled={!canPlayMidi}
+        >
+          To Sheet Music
+        </button>
         <span className="status">{status}</span>
       </div>
 
       {status === "Error" && errorDetails ? (
         <pre className="errorDetails">{errorDetails}</pre>
+      ) : null}
+
+      {musicXml ? (
+        <div className="panel">
+          <div className="panelTitle">Sheet Music</div>
+          <div ref={sheetContainerRef} className="sheetMusic" />
+        </div>
       ) : null}
     </>
   );

@@ -53,6 +53,12 @@
     "Liberation Mono", "Courier New", monospace;
 }
 
+.sheetMusic {
+  width: 100%;
+  min-height: 360px;
+  overflow: auto;
+}
+
 .logo {
   height: 6em;
   padding: 1.5em;

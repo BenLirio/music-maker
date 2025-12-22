@@ -59,3 +59,39 @@ You need AWS credentials configured (e.g. `AWS_PROFILE`) and (depending on your 
 ```bash
 npm run deploy
 ```
+
+## MIDI → MusicXML (music21)
+
+This backend also exposes a MIDI-to-MusicXML endpoint used by the frontend "To Sheet Music" button.
+
+- Endpoint: `POST http://localhost:3000/dev/midi-to-musicxml`
+- Body: `{ "midiBase64": "..." }`
+- Response: `{ "ok": true, "musicxml": "..." }`
+
+### Local prerequisite
+
+This endpoint shells out to `python3` and uses the Python package `music21`.
+
+Install it locally (system Python):
+
+```bash
+python3 -m pip install music21
+```
+
+If you prefer a virtualenv (recommended to avoid system Python conflicts):
+
+```bash
+cd backend
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install music21
+```
+
+Then point the backend at that interpreter (so `serverless-offline` uses the venv):
+
+```bash
+export MUSIC21_PYTHON="$PWD/.venv/bin/python"
+```
+
+Note: Deploying this to AWS Lambda typically requires a container image or a Python runtime + layer that includes `music21`.

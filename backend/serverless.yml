@@ -69,5 +69,20 @@ functions:
               - POST
               - OPTIONS
 
+  midiToMusicXml:
+    handler: src/handler.midiToMusicXml
+    timeout: 30
+    events:
+      - http:
+          path: midi-to-musicxml
+          method: post
+          cors:
+            origin: ${self:custom.corsOriginByStage.${sls:stage}, 'http://localhost:5173'}
+            headers:
+              - Content-Type
+            methods:
+              - POST
+              - OPTIONS
+
 package:
   individually: true
