@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import * as Tone from "tone";
+import Soundfont from "soundfont-player";
 import "./App.css";
 
 import {
@@ -9,12 +10,19 @@ import {
 } from "./pyodideRunner";
 
 import {
+  buildProgramChangeMap,
   buildTempoMap,
   notesToSchedule,
   pairNotes,
   parseMidiCsv,
   type ScheduledNote,
 } from "./midiCsv";
+
+import {
+  GM_DRUM_CHANNEL,
+  gmDrumInstrumentName,
+  gmProgramToSoundfontName,
+} from "./gm";
 
 type PlaybackValue = ScheduledNote;
 
@@ -65,6 +73,7 @@ function App() {
   const [status, setStatus] = useState<
     | "Idle"
     | "Parsing…"
+    | "Loading instruments…"
     | "Loading Pyodide…"
     | "Running Python…"
     | "Playing…"
@@ -75,9 +84,50 @@ function App() {
   >("Idle");
 
   const partRef = useRef<Tone.Part<PlaybackValue> | null>(null);
-  const synthMainRef = useRef<Tone.PolySynth<Tone.Synth> | null>(null);
-  const synthBassRef = useRef<Tone.MonoSynth | null>(null);
+  const instrumentPromisesRef = useRef<Map<string, Promise<Soundfont.Player>>>(
+    new Map()
+  );
   const stopEventIdRef = useRef<number | null>(null);
+
+  const SOUNDFONT_NAME = "FluidR3_GM";
+  const SOUNDFONT_FORMAT = "mp3" as const;
+  const SOUNDFONT_BASE_URL = "https://gleitz.github.io/midi-js-soundfonts/";
+
+  function soundfontNameToUrl(
+    name: string,
+    soundfont: string,
+    format: string
+  ): string {
+    // midi-js-soundfonts uses files like:
+    // https://.../FluidR3_GM/acoustic_grand_piano-mp3.js
+    const base = SOUNDFONT_BASE_URL.endsWith("/")
+      ? SOUNDFONT_BASE_URL
+      : `${SOUNDFONT_BASE_URL}/`;
+    return `${base}${soundfont}/${name}-${format}.js`;
+  }
+
+  function getOrLoadInstrument(name: string): Promise<Soundfont.Player> {
+    const existing = instrumentPromisesRef.current.get(name);
+    if (existing) return existing;
+
+    const audioContext = Tone.getContext().rawContext as AudioContext;
+    const p = Soundfont.instrument(audioContext, name, {
+      soundfont: SOUNDFONT_NAME,
+      format: SOUNDFONT_FORMAT,
+      nameToUrl: soundfontNameToUrl,
+    }).catch(async (err) => {
+      // If an instrument is missing (varies by soundfont set), fall back to piano.
+      console.warn(`[soundfont] failed to load ${name}, falling back`, err);
+      return await Soundfont.instrument(audioContext, "acoustic_grand_piano", {
+        soundfont: SOUNDFONT_NAME,
+        format: SOUNDFONT_FORMAT,
+        nameToUrl: soundfontNameToUrl,
+      });
+    });
+
+    instrumentPromisesRef.current.set(name, p);
+    return p;
+  }
 
   const canPlayLabel = useMemo(() => {
     if (inputMode === "csv") return csvText.trim().length > 0;
@@ -93,10 +143,6 @@ function App() {
         partRef.current.dispose();
         partRef.current = null;
       }
-      synthMainRef.current?.dispose();
-      synthMainRef.current = null;
-      synthBassRef.current?.dispose();
-      synthBassRef.current = null;
     };
   }, []);
 
@@ -166,38 +212,53 @@ function App() {
     // Reset any prior playback.
     stopPlayback("Stopped");
 
-    if (!synthMainRef.current)
-      synthMainRef.current = new Tone.PolySynth(Tone.Synth).toDestination();
-    if (!synthBassRef.current)
-      synthBassRef.current = new Tone.MonoSynth().toDestination();
-
     const { ppq, events } = parseMidiCsv(text);
     const tempoMap = buildTempoMap(events, ppq);
     const notes = pairNotes(events);
+
+    const programMap = buildProgramChangeMap(events);
 
     if (notes.length === 0) {
       setStatus("No notes found.");
       return;
     }
 
-    const scheduled = notesToSchedule(notes, tempoMap.ticksToSeconds);
+    const scheduled = notesToSchedule(
+      notes,
+      tempoMap.ticksToSeconds,
+      programMap
+    );
 
-    const main = synthMainRef.current;
-    const bass = synthBassRef.current;
+    // Preload only instruments that are actually used.
+    setStatus("Loading instruments…");
 
-    if (!main || !bass) {
-      setStatus("Error");
-      return;
+    const requiredInstrumentNames = new Set<string>();
+    for (const n of scheduled) {
+      if (n.channel === GM_DRUM_CHANNEL) {
+        requiredInstrumentNames.add(gmDrumInstrumentName());
+      } else {
+        requiredInstrumentNames.add(gmProgramToSoundfontName(n.program));
+      }
+    }
+
+    const instruments = new Map<string, Soundfont.Player>();
+    for (const name of requiredInstrumentNames) {
+      instruments.set(name, await getOrLoadInstrument(name));
     }
 
     const part = new Tone.Part<PlaybackValue>((time, value) => {
-      const target = value.channel === 1 ? bass : main;
-      target.triggerAttackRelease(
-        value.name,
-        value.duration,
-        time,
-        value.velocity
-      );
+      const instrumentName =
+        value.channel === GM_DRUM_CHANNEL
+          ? gmDrumInstrumentName()
+          : gmProgramToSoundfontName(value.program);
+
+      const instrument = instruments.get(instrumentName);
+      if (!instrument) return;
+
+      instrument.play(value.name, time, {
+        gain: value.velocity,
+        duration: value.duration,
+      });
     }, scheduled);
 
     part.start(0);

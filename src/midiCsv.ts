@@ -33,9 +33,55 @@ export type ScheduledNote = {
   time: number;
   duration: number;
   name: string;
+  noteNumber: number;
   velocity: number;
   channel: number;
+  program: number;
 };
+
+export type ProgramChange = {
+  tick: number;
+  channel: number;
+  program: number;
+};
+
+export function buildProgramChangeMap(
+  events: MidiCsvEvent[]
+): Map<number, ProgramChange[]> {
+  const map = new Map<number, ProgramChange[]>();
+
+  for (const e of events) {
+    if (e.type !== "Program_c") continue;
+    const list = map.get(e.channel) ?? [];
+    list.push({ tick: e.tick, channel: e.channel, program: e.program });
+    map.set(e.channel, list);
+  }
+
+  for (const [, list] of map) {
+    list.sort((a, b) => a.tick - b.tick);
+  }
+
+  return map;
+}
+
+export function programAtTick(
+  programMap: Map<number, ProgramChange[]>,
+  channel: number,
+  tick: number,
+  defaultProgram = 0
+): number {
+  const list = programMap.get(channel);
+  if (!list || list.length === 0) return defaultProgram;
+
+  // Find the last program change at or before tick.
+  // Linear scan is fine for typical small CSVs; can be replaced with binary search if needed.
+  let current = defaultProgram;
+  for (const p of list) {
+    if (p.tick > tick) break;
+    current = p.program;
+  }
+  return current;
+}
 
 export function parseCsvLines(text: string): string[][] {
   return text
@@ -218,19 +264,27 @@ export function midiNoteNumberToName(n: number): string {
 
 export function notesToSchedule(
   notes: PairedNote[],
-  ticksToSeconds: (tick: number) => number
+  ticksToSeconds: (tick: number) => number,
+  programMap?: Map<number, ProgramChange[]>
 ): ScheduledNote[] {
   return notes
     .map((n) => {
       const time = ticksToSeconds(n.startTick);
       const endTime = ticksToSeconds(n.endTick);
       const duration = Math.max(0.01, endTime - time);
+
+      const program = programMap
+        ? programAtTick(programMap, n.channel, n.startTick, 0)
+        : 0;
+
       return {
         time,
         duration,
         name: midiNoteNumberToName(n.note),
+        noteNumber: n.note,
         velocity: n.velocity,
         channel: n.channel,
+        program,
       };
     })
     .sort((a, b) => a.time - b.time);
