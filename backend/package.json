@@ -1,0 +1,17 @@
+{
+  "name": "music-maker-backend",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "serverless offline",
+    "deploy": "serverless deploy",
+    "remove": "serverless remove"
+  },
+  "devDependencies": {
+    "@types/aws-lambda": "^8.10.152",
+    "serverless": "^4.0.0",
+    "serverless-offline": "^14.4.0",
+    "typescript": "^5.9.3"
+  }
+}

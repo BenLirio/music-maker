@@ -1,0 +1,48 @@
+service: music-maker-backend
+
+frameworkVersion: "4"
+
+provider:
+  name: aws
+  runtime: nodejs20.x
+  region: us-east-1
+  stage: ${opt:stage, 'dev'}
+  environment:
+    ALLOWED_ORIGINS: ${self:custom.allowedOriginsByStage.${sls:stage}, self:custom.allowedOriginsByStage.dev}
+
+plugins:
+  - serverless-offline
+
+custom:
+  corsOriginByStage:
+    dev: http://localhost:5173
+    prod: https://benlirio.com
+  allowedOriginsByStage:
+    dev: http://localhost:5173,http://localhost:3000
+    prod: https://benlirio.com
+
+build:
+  esbuild:
+    bundle: true
+    minify: false
+    sourcemap: true
+    target: node20
+    platform: node
+
+functions:
+  ping:
+    handler: src/handler.ping
+    events:
+      - http:
+          path: ping
+          method: get
+          cors:
+            origin: ${self:custom.corsOriginByStage.${sls:stage}, 'http://localhost:5173'}
+            headers:
+              - Content-Type
+            methods:
+              - GET
+              - OPTIONS
+
+package:
+  individually: true

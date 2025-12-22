@@ -58,6 +58,10 @@ function App() {
   const [inputMode, setInputMode] = useState<"csv" | "py">("csv");
   const [pythonCode, setPythonCode] = useState(DEFAULT_PYTHON);
   const [errorDetails, setErrorDetails] = useState<string | null>(null);
+  const [backendTestStatus, setBackendTestStatus] = useState<
+    "Idle" | "Testing…" | "OK" | "Error"
+  >("Idle");
+  const [backendTestMessage, setBackendTestMessage] = useState<string>("");
   const [status, setStatus] = useState<
     | "Idle"
     | "Parsing…"
@@ -126,6 +130,35 @@ function App() {
     }
   }
 
+  async function testBackendConnection() {
+    setBackendTestStatus("Testing…");
+    setBackendTestMessage("");
+
+    const baseUrl =
+      (import.meta.env.VITE_BACKEND_URL as string | undefined) ??
+      "http://localhost:3000/dev";
+
+    try {
+      const res = await fetch(`${baseUrl}/ping`, {
+        method: "GET",
+        headers: { accept: "application/json" },
+      });
+
+      const text = await res.text();
+      if (!res.ok) {
+        setBackendTestStatus("Error");
+        setBackendTestMessage(`HTTP ${res.status}: ${text}`);
+        return;
+      }
+
+      setBackendTestStatus("OK");
+      setBackendTestMessage(text);
+    } catch (err) {
+      setBackendTestStatus("Error");
+      setBackendTestMessage(formatUnknownError(err));
+    }
+  }
+
   async function playFromCsv(text: string) {
     setErrorDetails(null);
     setStatus("Parsing…");
@@ -184,6 +217,16 @@ function App() {
   return (
     <>
       <h2>MIDI CSV → Play (Tone.js)</h2>
+
+      <div className="row">
+        <button type="button" onClick={testBackendConnection}>
+          Test backend connection
+        </button>
+        <span>
+          Backend: {backendTestStatus}
+          {backendTestMessage ? ` — ${backendTestMessage}` : ""}
+        </span>
+      </div>
 
       <div className="row">
         <label>

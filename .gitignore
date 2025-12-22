@@ -1,4 +1,12 @@
-# Logs
+node_modules/
+dist/
+
+# Local env files
+.env
+
+# Serverless build artifacts
+.serverless/
+backend/.serverless/# Logs
 logs
 *.log
 npm-debug.log*
