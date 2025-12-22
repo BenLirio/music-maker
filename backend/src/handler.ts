@@ -27,7 +27,7 @@ function getCorsHeaders(
   return {
     "content-type": "application/json; charset=utf-8",
     "access-control-allow-origin": allowOrigin,
-    "access-control-allow-headers": "content-type",
+    "access-control-allow-headers": "content-type,accept,authorization",
     "access-control-allow-methods": allowMethods,
     vary: "Origin",
   };
