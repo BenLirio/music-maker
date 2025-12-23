@@ -3,6 +3,8 @@ import json
 import os
 import sys
 import tempfile
+import re
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -106,7 +108,53 @@ def _midi_bytes_to_musicxml(midi_bytes: bytes) -> str:
     score = converter.parse(str(midi_path))
     score.write("musicxml", fp=str(out_path))
 
-    return out_path.read_text(encoding="utf-8")
+    xml_text = out_path.read_text(encoding="utf-8")
+    return _sanitize_musicxml_for_osmd(xml_text)
+
+
+def _sanitize_musicxml_for_osmd(xml_text: str) -> str:
+  """Best-effort normalization for OpenSheetMusicDisplay.
+
+  music21 can emit MusicXML 4.0 with a DOCTYPE plus multi-instrument metadata
+  in a single part. OSMD is more reliable when:
+  - DOCTYPE is absent
+  - each score-part has a single score-instrument/midi-instrument
+  - per-note <instrument> tags are removed
+  """
+
+  # ElementTree can't reliably parse strings containing a DOCTYPE, so drop it.
+  # MusicXML exports commonly include:
+  #   <!DOCTYPE score-partwise PUBLIC "..." "http://www.musicxml.org/dtds/partwise.dtd">
+  cleaned = re.sub(r"<!DOCTYPE[\s\S]*?>", "", xml_text).strip()
+
+  try:
+    root = ET.fromstring(cleaned)
+  except Exception:
+    # If parsing fails, fall back to just stripping the DOCTYPE.
+    return cleaned
+
+  # Collapse multi-instrument declarations to the first instrument.
+  for score_part in root.findall("./part-list/score-part"):
+    score_instruments = score_part.findall("score-instrument")
+    for extra in score_instruments[1:]:
+      score_part.remove(extra)
+
+    midi_instruments = score_part.findall("midi-instrument")
+    for extra in midi_instruments[1:]:
+      score_part.remove(extra)
+
+  # Remove per-note instrument switches and non-standard attributes that can
+  # trip up some renderers.
+  for note in root.findall(".//note"):
+    if "dynamics" in note.attrib:
+      del note.attrib["dynamics"]
+
+    for inst in list(note.findall("instrument")):
+      note.remove(inst)
+
+  return ET.tostring(root, encoding="utf-8", xml_declaration=True).decode(
+      "utf-8"
+  )
 
 
 def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:

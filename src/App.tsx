@@ -16,6 +16,8 @@ import {
   notesToSchedule,
   pairNotes,
   parseMidiCsv,
+  programAtTick,
+  type MidiCsvEvent,
   type ScheduledNote,
 } from "./midiCsv";
 
@@ -28,6 +30,12 @@ import {
 } from "./gm";
 
 type PlaybackValue = ScheduledNote;
+
+type SheetTab = {
+  id: string;
+  label: string;
+  musicXml: string;
+};
 
 const DEFAULT_CSV = `# Paste your MIDI CSV here (midicsv output style)
 0, 0, Header, 1, 2, 480
@@ -91,14 +99,22 @@ function App() {
     | "No notes found."
   >("Idle");
 
-  const [musicXml, setMusicXml] = useState<string | null>(null);
+  const [sheetTabs, setSheetTabs] = useState<SheetTab[]>([]);
+  const [activeSheetId, setActiveSheetId] = useState<string | null>(null);
   const sheetContainerRef = useRef<HTMLDivElement | null>(null);
   const osmdRef = useRef<unknown | null>(null);
+  const sheetRenderTokenRef = useRef<number>(0);
+
+  const activeMusicXml = useMemo(() => {
+    if (!activeSheetId) return null;
+    return sheetTabs.find((t) => t.id === activeSheetId)?.musicXml ?? null;
+  }, [sheetTabs, activeSheetId]);
 
   useEffect(() => {
-    if (!musicXml) return;
+    if (!activeMusicXml) return;
 
     let cancelled = false;
+    const token = (sheetRenderTokenRef.current += 1);
 
     void (async () => {
       try {
@@ -115,15 +131,23 @@ function App() {
           }
         ).OpenSheetMusicDisplay;
 
-        if (!osmdRef.current) {
-          osmdRef.current = new OpenSheetMusicDisplay(container);
-        }
+        // IMPORTANT: the sheet container is conditionally rendered. When we
+        // regenerate sheet music, React unmounts/remounts the container.
+        // Any cached OSMD instance would still be bound to the *old* DOM node,
+        // which makes subsequent renders appear blank.
+        //
+        // Create a fresh OSMD instance bound to the current container.
+        if (token !== sheetRenderTokenRef.current || cancelled) return;
+        container.innerHTML = "";
+        const osmd = new OpenSheetMusicDisplay(container);
+        osmdRef.current = osmd;
 
-        const osmd = osmdRef.current as any;
-        await osmd.load(musicXml);
+        await osmd.load(activeMusicXml);
+        if (token !== sheetRenderTokenRef.current || cancelled) return;
         osmd.render();
 
-        if (!cancelled) setStatus("Idle");
+        if (!cancelled && token === sheetRenderTokenRef.current)
+          setStatus("Idle");
       } catch (err) {
         if (cancelled) return;
         setErrorDetails(formatUnknownError(err));
@@ -134,7 +158,141 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [musicXml]);
+  }, [activeMusicXml]);
+
+  function titleCaseFromSnake(s: string): string {
+    return s.replace(/_/g, " ").replace(/\b\w/g, (m) => m.toUpperCase());
+  }
+
+  function midiCsvForSingleChannel(
+    ppq: number,
+    tempoEvents: Extract<MidiCsvEvent, { type: "Tempo" }>[],
+    programEvents: Extract<MidiCsvEvent, { type: "Program_c" }>[],
+    noteEvents: Extract<MidiCsvEvent, { type: "Note_on_c" | "Note_off_c" }>[],
+    channel: number,
+    defaultProgram: number
+  ): string {
+    const lines: string[] = [];
+    lines.push(`0, 0, Header, 1, 2, ${ppq}`);
+    lines.push("1, 0, Start_track");
+
+    const tempos = [...tempoEvents].sort((a, b) => a.tick - b.tick);
+    if (tempos.length === 0) {
+      lines.push("1, 0, Tempo, 500000");
+    } else {
+      for (const t of tempos) {
+        lines.push(
+          `1, ${Math.max(0, Math.floor(t.tick))}, Tempo, ${Math.max(
+            1,
+            Math.floor(t.mpqn)
+          )}`
+        );
+      }
+    }
+    lines.push("1, 0, End_track");
+
+    lines.push("2, 0, Start_track");
+
+    const channelPrograms = programEvents
+      .filter((e) => e.channel === channel)
+      .sort((a, b) => a.tick - b.tick);
+
+    // Ensure there is a program at tick 0 for non-drum channels.
+    const hasProgramAt0 = channelPrograms.some((e) => e.tick === 0);
+    if (channel !== GM_DRUM_CHANNEL && !hasProgramAt0) {
+      lines.push(`2, 0, Program_c, ${channel}, ${defaultProgram}`);
+    }
+
+    for (const p of channelPrograms) {
+      lines.push(
+        `2, ${Math.max(
+          0,
+          Math.floor(p.tick)
+        )}, Program_c, ${channel}, ${Math.max(
+          0,
+          Math.min(127, Math.floor(p.program))
+        )}`
+      );
+    }
+
+    const channelNotes = noteEvents
+      .filter((e) => e.channel === channel)
+      .sort((a, b) => a.tick - b.tick);
+
+    let endTick = 0;
+    for (const n of channelNotes) {
+      const tick = Math.max(0, Math.floor(n.tick));
+      endTick = Math.max(endTick, tick);
+      const note = Math.max(0, Math.min(127, Math.floor(n.note)));
+      const vel = Math.max(0, Math.min(127, Math.floor(n.velocity)));
+      lines.push(`2, ${tick}, ${n.type}, ${channel}, ${note}, ${vel}`);
+    }
+
+    lines.push(`2, ${endTick}, End_track`);
+    lines.push("0, 0, End_of_file");
+    return lines.join("\n") + "\n";
+  }
+
+  function splitMidiCsvByInstrument(csv: string): Array<{
+    id: string;
+    label: string;
+    csv: string;
+  }> {
+    const { ppq, events } = parseMidiCsv(csv);
+
+    const tempoEvents = events.filter(
+      (e): e is Extract<MidiCsvEvent, { type: "Tempo" }> => e.type === "Tempo"
+    );
+    const programEvents = events.filter(
+      (e): e is Extract<MidiCsvEvent, { type: "Program_c" }> =>
+        e.type === "Program_c"
+    );
+    const noteEvents = events.filter(
+      (e): e is Extract<MidiCsvEvent, { type: "Note_on_c" | "Note_off_c" }> =>
+        e.type === "Note_on_c" || e.type === "Note_off_c"
+    );
+
+    const channels = Array.from(new Set(noteEvents.map((e) => e.channel))).sort(
+      (a, b) => a - b
+    );
+
+    const programMap = buildProgramChangeMap(events);
+
+    return channels.map((channel) => {
+      const firstNoteTick =
+        noteEvents
+          .filter((e) => e.channel === channel)
+          .reduce(
+            (min, e) => Math.min(min, e.tick),
+            Number.POSITIVE_INFINITY
+          ) || 0;
+
+      const inferredProgram =
+        channel === GM_DRUM_CHANNEL
+          ? 0
+          : programAtTick(programMap, channel, firstNoteTick, 0);
+
+      const label =
+        channel === GM_DRUM_CHANNEL
+          ? "Drums"
+          : titleCaseFromSnake(gmProgramToSoundfontName(inferredProgram));
+
+      const splitCsv = midiCsvForSingleChannel(
+        ppq,
+        tempoEvents,
+        programEvents,
+        noteEvents,
+        channel,
+        inferredProgram
+      );
+
+      return {
+        id: `ch${channel}-p${inferredProgram}`,
+        label,
+        csv: splitCsv,
+      };
+    });
+  }
 
   const partRef = useRef<Tone.Part<PlaybackValue> | null>(null);
   const instrumentPromisesRef = useRef<Map<string, Promise<Soundfont.Player>>>(
@@ -446,67 +604,97 @@ function App() {
 
   async function toSheetMusicFromCsv() {
     setErrorDetails(null);
-    setMusicXml(null);
+
+    // Cancel any in-flight OSMD render and drop the cached instance since the
+    // container will unmount when we clear tabs.
+    sheetRenderTokenRef.current += 1;
+    osmdRef.current = null;
+    if (sheetContainerRef.current) sheetContainerRef.current.innerHTML = "";
+
+    setSheetTabs([]);
+    setActiveSheetId(null);
 
     const baseUrl =
       (import.meta.env.VITE_BACKEND_URL as string | undefined) ??
       "http://localhost:3000/dev";
 
     try {
-      setStatus("Converting to MusicXML…");
-
-      const midiBytes = midiCsvToMidiFileBytes(csvText);
-      const midiBase64 = midiBytesToBase64(midiBytes);
-
-      const controller = new AbortController();
-      const timeoutId = window.setTimeout(() => controller.abort(), 28_000);
-
-      const res = await fetch(`${baseUrl}/midi-to-musicxml`, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          accept: "application/json",
-        },
-        body: JSON.stringify({ midiBase64 }),
-        signal: controller.signal,
-      }).finally(() => {
-        window.clearTimeout(timeoutId);
-      });
-
-      const text = await res.text();
-      if (!res.ok) {
-        setErrorDetails(`HTTP ${res.status}: ${text}`);
-        setStatus("Error");
+      const parts = splitMidiCsvByInstrument(csvText);
+      if (parts.length === 0) {
+        setStatus("No notes found.");
         return;
       }
 
-      let data: unknown;
-      try {
-        data = JSON.parse(text);
-      } catch {
-        setErrorDetails(`Backend returned non-JSON:\n\n${text}`);
-        setStatus("Error");
-        return;
+      const tabs: SheetTab[] = [];
+      const warnings: string[] = [];
+
+      for (let i = 0; i < parts.length; i++) {
+        const part = parts[i];
+        setStatus(`Converting to MusicXML… (${i + 1}/${parts.length})`);
+
+        const midiBytes = midiCsvToMidiFileBytes(part.csv);
+        const midiBase64 = midiBytesToBase64(midiBytes);
+
+        const controller = new AbortController();
+        const timeoutId = window.setTimeout(() => controller.abort(), 28_000);
+
+        const res = await fetch(`${baseUrl}/midi-to-musicxml`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            accept: "application/json",
+          },
+          body: JSON.stringify({ midiBase64 }),
+          signal: controller.signal,
+        }).finally(() => {
+          window.clearTimeout(timeoutId);
+        });
+
+        const text = await res.text();
+        if (!res.ok) {
+          setErrorDetails(`HTTP ${res.status} (${part.label}): ${text}`);
+          setStatus("Error");
+          return;
+        }
+
+        let data: unknown;
+        try {
+          data = JSON.parse(text);
+        } catch {
+          setErrorDetails(
+            `Backend returned non-JSON (${part.label}):\n\n${text}`
+          );
+          setStatus("Error");
+          return;
+        }
+
+        const obj = data as {
+          ok?: unknown;
+          musicxml?: unknown;
+          warnings?: unknown;
+        };
+        if (obj.ok !== true || typeof obj.musicxml !== "string") {
+          setErrorDetails(`Unexpected response (${part.label}):\n\n${text}`);
+          setStatus("Error");
+          return;
+        }
+
+        if (
+          typeof obj.warnings === "string" &&
+          obj.warnings.trim().length > 0
+        ) {
+          warnings.push(`${part.label}: ${obj.warnings.trim()}`);
+        }
+
+        tabs.push({ id: part.id, label: part.label, musicXml: obj.musicxml });
       }
 
-      const obj = data as {
-        ok?: unknown;
-        musicxml?: unknown;
-        warnings?: unknown;
-      };
-      if (obj.ok !== true || typeof obj.musicxml !== "string") {
-        setErrorDetails(`Unexpected response:\n\n${text}`);
-        setStatus("Error");
-        return;
+      if (warnings.length > 0) {
+        setErrorDetails(warnings.join("\n\n"));
       }
 
-      if (typeof obj.warnings === "string" && obj.warnings.trim().length > 0) {
-        // Non-fatal diagnostics from python/music21.
-        setErrorDetails(obj.warnings);
-      }
-
-      setMusicXml(obj.musicxml);
-      // Rendering happens in a useEffect once the sheet container is mounted.
+      setSheetTabs(tabs);
+      setActiveSheetId(tabs[0]?.id ?? null);
       setStatus("Rendering sheet music…");
     } catch (err) {
       setErrorDetails(formatUnknownError(err));
@@ -646,9 +834,21 @@ function App() {
         <pre className="errorDetails">{errorDetails}</pre>
       ) : null}
 
-      {musicXml ? (
+      {sheetTabs.length > 0 ? (
         <div className="panel">
           <div className="panelTitle">Sheet Music</div>
+          <div className="row">
+            {sheetTabs.map((t) => (
+              <button
+                key={t.id}
+                type="button"
+                onClick={() => setActiveSheetId(t.id)}
+                disabled={t.id === activeSheetId}
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
           <div ref={sheetContainerRef} className="sheetMusic" />
         </div>
       ) : null}
