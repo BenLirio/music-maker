@@ -22,7 +22,7 @@ Set these environment variables in your shell before starting `serverless-offlin
 
 - `OPENAI_API_KEY` (required)
 - `OPENAI_MODEL` (optional, default `gpt-5.2`)
-- `OPENAI_MAX_OUTPUT_TOKENS` (optional, default `8192`)
+- `OPENAI_MAX_OUTPUT_TOKENS` (optional, default `100000`)
 - `OPENAI_TIMEOUT_MS` (optional, default `25000`; increase if you request long programs)
 
 One convenient approach is to create a local file `backend/.env` (this repo ignores `.env` files), then load it in your shell:
@@ -40,7 +40,7 @@ Example `backend/.env`:
 ```bash
 OPENAI_API_KEY=sk-...
 OPENAI_MODEL=gpt-5.2
-OPENAI_MAX_OUTPUT_TOKENS=8192
+OPENAI_MAX_OUTPUT_TOKENS=100000
 OPENAI_TIMEOUT_MS=60000
 ```
 

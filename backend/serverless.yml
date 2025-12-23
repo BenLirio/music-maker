@@ -7,15 +7,22 @@ provider:
   runtime: nodejs20.x
   region: us-east-1
   stage: ${opt:stage, 'dev'}
+  # Required to use API Gateway integration timeouts > 29s.
+  # (The AWS feature applies to Regional/private REST APIs, not EDGE.)
+  endpointType: REGIONAL
   # OpenAI calls often exceed the default 6s.
-  timeout: 30
+  # Note: API Gateway sync requests will still time out unless the per-method
+  # integration timeout is also raised (see resources.extensions below).
+  timeout: ${env:LAMBDA_TIMEOUT_SECONDS, 60}
   environment:
     ALLOWED_ORIGINS: ${self:custom.allowedOriginsByStage.${sls:stage}, self:custom.allowedOriginsByStage.dev}
     # Do NOT commit secrets. Provide these via your shell env (local) or CI/Serverless deploy env.
     OPENAI_API_KEY: ${env:OPENAI_API_KEY, ''}
     OPENAI_MODEL: ${env:OPENAI_MODEL, 'gpt-5.2'}
-    OPENAI_MAX_OUTPUT_TOKENS: ${env:OPENAI_MAX_OUTPUT_TOKENS, '8192'}
-    OPENAI_TIMEOUT_MS: ${env:OPENAI_TIMEOUT_MS, '25000'}
+    # Large cap; the OpenAI API/model will still enforce a hard maximum.
+    OPENAI_MAX_OUTPUT_TOKENS: ${env:OPENAI_MAX_OUTPUT_TOKENS, '100000'}
+    # Should be <= API Gateway integration timeout (in ms).
+    OPENAI_TIMEOUT_MS: ${env:OPENAI_TIMEOUT_MS, '55000'}
     # Optional override for testing/proxies.
     OPENAI_BASE_URL: ${env:OPENAI_BASE_URL, 'https://api.openai.com/v1/responses'}
 
@@ -26,7 +33,7 @@ plugins:
 custom:
   serverless-offline:
     # Keep local behavior aligned with provider.timeout.
-    lambdaTimeout: 30
+    lambdaTimeout: ${env:LAMBDA_TIMEOUT_SECONDS, 60}
     # serverless-offline uses a separate "lambda server" port; 3002 is commonly
     # occupied by other dev tools. Keep HTTP on 3000 to match VITE_BACKEND_URL.
     httpPort: 3000
@@ -60,7 +67,7 @@ functions:
 
   generatePython:
     handler: src/handler.generatePython
-    timeout: 30
+    timeout: ${env:LAMBDA_TIMEOUT_SECONDS, 60}
     events:
       - http:
           path: generate-python
@@ -72,7 +79,7 @@ functions:
   midiToMusicXml:
     runtime: python3.12
     handler: src/midi_to_musicxml_handler.lambda_handler
-    timeout: 30
+    timeout: ${env:LAMBDA_TIMEOUT_SECONDS, 60}
     events:
       - http:
           path: midi-to-musicxml
@@ -92,6 +99,24 @@ package:
     - "!node_modules/**"
 
 resources:
+  # Serverless does not currently expose REST API integration timeouts as a
+  # first-class setting. We extend the generated AWS::ApiGateway::Method
+  # resources to set Integration.TimeoutInMillis.
+  #
+  # This is what allows sync API Gateway requests to exceed the historic 29s
+  # limit (Regional/private REST APIs only). Raising this may require reducing
+  # your account-level throttle quota limit.
+  extensions:
+    # POST /generate-python
+    ApiGatewayMethodGenerateDashpythonPost:
+      Properties:
+        Integration:
+          TimeoutInMillis: ${env:APIGW_INTEGRATION_TIMEOUT_MS, 60000}
+    # POST /midi-to-musicxml
+    ApiGatewayMethodMidiDashtoDashmusicxmlPost:
+      Properties:
+        Integration:
+          TimeoutInMillis: ${env:APIGW_INTEGRATION_TIMEOUT_MS, 60000}
   Resources:
     # Ensure API Gateway-generated errors include CORS headers.
     # Without this, the browser often reports a generic "CORS error" even when
