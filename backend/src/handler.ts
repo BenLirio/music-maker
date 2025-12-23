@@ -137,6 +137,17 @@ async function openAiGeneratePyodideMidiPython(userPrompt: string): Promise<{
     process.env.OPENAI_BASE_URL?.trim() ||
     "https://api.openai.com/v1/responses";
 
+  const maxOutputTokensRaw = Number(
+    process.env.OPENAI_MAX_OUTPUT_TOKENS ?? "8192"
+  );
+  const maxOutputTokens =
+    Number.isFinite(maxOutputTokensRaw) && maxOutputTokensRaw >= 256
+      ? Math.floor(maxOutputTokensRaw)
+      : 8192;
+
+  const PY_BEGIN = "# MUSIC_MAKER_PY_BEGIN";
+  const PY_END = "# MUSIC_MAKER_PY_END";
+
   // System-style prefix tuned for this app:
   // - Python must run in Pyodide (no file I/O, no external deps)
   // - Must print MIDI CSV (midicsv style) to stdout
@@ -148,44 +159,83 @@ async function openAiGeneratePyodideMidiPython(userPrompt: string): Promise<{
     "- Print ONLY the CSV text to stdout (no extra commentary).",
     "- Include a valid CSV header and end-of-file marker.",
     "- Use tempo and note events; optionally include Program_c changes.",
-    "- Do NOT wrap the code in markdown fences.",
-    "Output: raw Python source code only.",
+    "- Prefer compact, loop-based generation. Avoid enumerating thousands of events line-by-line.",
+    "- Do NOT output markdown. Do NOT include backticks anywhere in the output.",
+    "Output format (MANDATORY):",
+    `- The first non-empty line MUST be exactly: ${PY_BEGIN}`,
+    `- The last non-empty line MUST be exactly: ${PY_END}`,
+    "- Between those markers, output only Python source code.",
   ].join("\n");
 
   const controller = new AbortController();
   const timeoutMs = Number(process.env.OPENAI_TIMEOUT_MS ?? "25000");
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
-  const res = await fetch(endpoint, {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${apiKey}`,
-      "content-type": "application/json",
-    },
-    signal: controller.signal,
-    body: JSON.stringify({
-      model,
-      input: [
-        { role: "system", content: instruction },
-        { role: "user", content: userPrompt },
-      ],
-      // Keep the output focused. (OpenAI may ignore depending on model.)
-      max_output_tokens: 1200,
-    }),
-  }).finally(() => {
-    clearTimeout(timeoutId);
-  });
+  async function callOpenAi(
+    input: Array<{ role: string; content: string }>
+  ): Promise<unknown> {
+    const res = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${apiKey}`,
+        "content-type": "application/json",
+      },
+      signal: controller.signal,
+      body: JSON.stringify({
+        model,
+        input,
+        max_output_tokens: maxOutputTokens,
+      }),
+    });
 
-  const text = await res.text();
-  if (!res.ok) {
-    throw new Error(`OpenAI HTTP ${res.status}: ${text}`);
+    const text = await res.text();
+    if (!res.ok) {
+      throw new Error(`OpenAI HTTP ${res.status}: ${text}`);
+    }
+
+    try {
+      return JSON.parse(text) as unknown;
+    } catch {
+      throw new Error(`OpenAI returned non-JSON: ${text.slice(0, 500)}`);
+    }
+  }
+
+  function looksIncomplete(payload: unknown): boolean {
+    if (!payload || typeof payload !== "object") return false;
+    const p = payload as Record<string, unknown>;
+    if (p.status === "incomplete") return true;
+    if (p.incomplete_details) return true;
+
+    const output = p.output;
+    if (Array.isArray(output)) {
+      for (const item of output) {
+        if (!item || typeof item !== "object") continue;
+        const r = item as Record<string, unknown>;
+        const finishReason = r.finish_reason ?? r.stop_reason;
+        if (finishReason === "length" || finishReason === "max_output_tokens") {
+          return true;
+        }
+      }
+    }
+
+    const choices = p.choices;
+    if (Array.isArray(choices) && choices.length > 0) {
+      const first = choices[0] as Record<string, unknown> | undefined;
+      const finishReason = first?.finish_reason;
+      if (finishReason === "length") return true;
+    }
+
+    return false;
   }
 
   let data: unknown;
   try {
-    data = JSON.parse(text);
-  } catch {
-    throw new Error(`OpenAI returned non-JSON: ${text.slice(0, 500)}`);
+    data = await callOpenAi([
+      { role: "system", content: instruction },
+      { role: "user", content: userPrompt },
+    ]);
+  } finally {
+    clearTimeout(timeoutId);
   }
 
   function extractText(payload: unknown): string {
@@ -227,12 +277,83 @@ async function openAiGeneratePyodideMidiPython(userPrompt: string): Promise<{
     return "";
   }
 
-  let out = extractText(data);
+  function extractMarkedPython(text: string): {
+    python: string;
+    hasMarkers: boolean;
+  } {
+    const raw = text.trim();
+    const beginIdx = raw.indexOf(PY_BEGIN);
+    const endIdx = raw.indexOf(PY_END);
+    if (beginIdx === -1 || endIdx === -1 || endIdx <= beginIdx) {
+      return { python: raw, hasMarkers: false };
+    }
+    const slice = raw.slice(beginIdx, endIdx + PY_END.length).trim();
+    return { python: slice, hasMarkers: true };
+  }
 
-  out = stripCodeFences(out);
+  function hasEndMarker(text: string): boolean {
+    return text.trimEnd().endsWith(PY_END);
+  }
+
+  let out = stripCodeFences(extractText(data));
   if (!out) throw new Error("OpenAI returned empty output.");
 
-  return { python: out, model };
+  // Robust completion strategy:
+  // - If missing the end marker, keep asking to continue (up to a few tries).
+  // - If markdown/backticks appear, ask the model to restate using the mandated markers.
+  const maxAttempts = 3;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const { python: marked, hasMarkers } = extractMarkedPython(out);
+    const hasBackticks = out.includes("```");
+
+    if (hasMarkers && hasEndMarker(marked) && !hasBackticks) {
+      return { python: marked, model };
+    }
+
+    const tail = out.length > 5000 ? out.slice(-5000) : out;
+    const needsRestate = hasBackticks || !hasMarkers;
+    const continuationPrompt = needsRestate
+      ? [
+          "Your previous response did not follow the required output format.",
+          `Restate the COMPLETE program using the required markers ${PY_BEGIN} and ${PY_END}.`,
+          "Rules:",
+          "- Do not include markdown or backticks.",
+          "- First non-empty line must be the BEGIN marker; last non-empty line must be the END marker.",
+        ].join("\n")
+      : [
+          "Your previous response was cut off before completing the program.",
+          "Continue from exactly where it ended until the END marker is printed.",
+          "Rules:",
+          "- Output ONLY the remaining Python source code.",
+          "- Do NOT repeat any lines already emitted.",
+          "- Do NOT use markdown or backticks.",
+          `- Ensure the final non-empty line is exactly: ${PY_END}`,
+          "Here is the tail of what you already wrote:",
+          tail,
+        ].join("\n");
+
+    const nextData = await callOpenAi([
+      { role: "system", content: instruction },
+      { role: "user", content: continuationPrompt },
+    ]);
+
+    const nextText = stripCodeFences(extractText(nextData)).trim();
+    if (!nextText) break;
+
+    if (needsRestate) {
+      out = nextText;
+    } else {
+      out = `${out}\n${nextText}`;
+    }
+
+    // If the API explicitly signals it's still incomplete, keep looping.
+    if (!looksIncomplete(nextData) && attempt === maxAttempts - 1) {
+      break;
+    }
+  }
+
+  // Best-effort fallback if we couldn't get perfect markers.
+  return { python: out.trim(), model };
 }
 
 export async function ping(

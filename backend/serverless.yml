@@ -14,6 +14,8 @@ provider:
     # Do NOT commit secrets. Provide these via your shell env (local) or CI/Serverless deploy env.
     OPENAI_API_KEY: ${env:OPENAI_API_KEY, ''}
     OPENAI_MODEL: ${env:OPENAI_MODEL, 'gpt-5.2'}
+    OPENAI_MAX_OUTPUT_TOKENS: ${env:OPENAI_MAX_OUTPUT_TOKENS, '8192'}
+    OPENAI_TIMEOUT_MS: ${env:OPENAI_TIMEOUT_MS, '25000'}
     # Optional override for testing/proxies.
     OPENAI_BASE_URL: ${env:OPENAI_BASE_URL, 'https://api.openai.com/v1/responses'}
 
