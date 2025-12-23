@@ -12,6 +12,7 @@
     "@types/aws-lambda": "^8.10.152",
     "@types/node": "^24.10.1",
     "serverless": "^4.0.0",
+    "serverless-python-requirements": "^6.1.2",
     "serverless-offline": "^14.4.0",
     "typescript": "^5.9.3"
   }

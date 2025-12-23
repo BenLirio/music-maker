@@ -19,11 +19,20 @@ provider:
 
 plugins:
   - serverless-offline
+  - serverless-python-requirements
 
 custom:
   serverless-offline:
     # Keep local behavior aligned with provider.timeout.
     lambdaTimeout: 30
+    # serverless-offline uses a separate "lambda server" port; 3002 is commonly
+    # occupied by other dev tools. Keep HTTP on 3000 to match VITE_BACKEND_URL.
+    httpPort: 3000
+    lambdaPort: 3003
+  pythonRequirements:
+    dockerizePip: non-linux
+    slim: true
+    strip: false
   allowedOriginsByStage:
     dev: http://localhost:5173,http://localhost:3000
     prod: https://benlirio.com,https://www.benlirio.com
@@ -59,7 +68,8 @@ functions:
           method: options
 
   midiToMusicXml:
-    handler: src/handler.midiToMusicXml
+    runtime: python3.12
+    handler: src/midi_to_musicxml_handler.lambda_handler
     timeout: 30
     events:
       - http:
@@ -71,6 +81,13 @@ functions:
 
 package:
   individually: true
+  patterns:
+    - "!**/.venv/**"
+    - "!**/__pycache__/**"
+    - "!**/*.pyc"
+    - "!**/.env"
+    - "!**/.env.*"
+    - "!node_modules/**"
 
 resources:
   Resources:
